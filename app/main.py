@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 # Replace with your Flask app URL
-url = "https://fastapi-sse-mcp.onrender.com"
+url = "https://www.google.com/"
 
 
 def reload_website():
