@@ -16,8 +16,11 @@ def create_sse_server(mcp: FastMCP):
         base_path = "/messages/"
         full_uri = f"{scheme}://{host}{base_path}"
         
-        # Create transport with full URI
-        transport = SseServerTransport(base_path, full_uri=full_uri)
+        # Create transport with base path only (no full_uri parameter)
+        transport = SseServerTransport(base_path)
+        
+        # Set the base URL properly before connecting
+        transport.base_url = full_uri
         
         async with transport.connect_sse(
             request.scope, request.receive, request._send
