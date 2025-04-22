@@ -8,6 +8,26 @@ import asyncio
 from contextlib import asynccontextmanager
 
 
+class AsyncStreamAdapter:
+    """
+    Adapter to make a Queue work as an async stream with context manager support.
+    """
+    def __init__(self, queue):
+        self.queue = queue
+    
+    async def __aenter__(self):
+        return self
+    
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        pass
+    
+    async def receive(self):
+        return await self.queue.get()
+    
+    async def send(self, data):
+        await self.queue.put(data)
+
+
 class CustomSseServerTransport(SseServerTransport):
     """Custom SSE Server Transport that ensures proper URL formatting"""
     
@@ -31,8 +51,12 @@ class CustomSseServerTransport(SseServerTransport):
         await send({"type": "http.response.start", "status": 200, "headers": headers})
         
         # Create reader and writer queues
-        reader = asyncio.Queue()
-        writer = asyncio.Queue()
+        reader_queue = asyncio.Queue()
+        writer_queue = asyncio.Queue()
+        
+        # Create stream adapters that support the async context manager protocol
+        reader = AsyncStreamAdapter(reader_queue)
+        writer = AsyncStreamAdapter(writer_queue)
         
         # Parse query string to get session_id
         query_string = scope.get("query_string", b"").decode("utf-8")
@@ -51,7 +75,7 @@ class CustomSseServerTransport(SseServerTransport):
         await send({"type": "http.response.body", "body": ping_event.encode("utf-8"), "more_body": True})
         
         # Start background task for handling the connection
-        task = asyncio.create_task(self._handle_connection(scope, receive, send, reader, writer))
+        task = asyncio.create_task(self._handle_connection(scope, receive, send, reader_queue, writer_queue))
         
         try:
             # Yield control back to the caller with the streams
@@ -64,7 +88,7 @@ class CustomSseServerTransport(SseServerTransport):
             except asyncio.CancelledError:
                 pass
     
-    async def _handle_connection(self, scope, receive, send, reader, writer):
+    async def _handle_connection(self, scope, receive, send, reader_queue, writer_queue):
         """Handle the ongoing SSE connection"""
         last_ping = asyncio.get_event_loop().time()
         
@@ -72,7 +96,7 @@ class CustomSseServerTransport(SseServerTransport):
             while True:
                 # Check for messages to send
                 try:
-                    message = writer.get_nowait()
+                    message = writer_queue.get_nowait()
                     if isinstance(message, dict):
                         event_type = message.get("event", "message")
                         data = message.get("data", "")
@@ -95,6 +119,9 @@ class CustomSseServerTransport(SseServerTransport):
                     message = await asyncio.wait_for(receive(), timeout=0.1)
                     if message["type"] == "http.disconnect":
                         break
+                    
+                    # If there's a message, put it in the reader queue
+                    await reader_queue.put(message)
                 except asyncio.TimeoutError:
                     # No message received, continue
                     pass
