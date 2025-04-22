@@ -41,12 +41,18 @@ class AsyncStreamAdapter:
         message = await self.queue.get()
         
         # Process the message to make it compatible with MCP
-        # If it's a dict from HTTP event, add a 'root' field to make it compatible
-        # with what the MCP server expects
-        if isinstance(message, dict) and 'type' in message:
-            # This is a raw HTTP message that needs to be processed
-            # Create a structure that MCP can handle (with a root attribute)
-            return type('MCPMessage', (), {'root': message})
+        if isinstance(message, dict):
+            # Validate the message structure before processing
+            try:
+                # Create a dynamic object with a root attribute containing the message
+                # This is what MCP expects - an object with a root attribute
+                message_obj = type('MCPMessage', (), {'root': message})
+                return message_obj
+            except Exception as e:
+                print(f"Error processing message: {e}")
+                # Return a valid object that indicates an error
+                error_message = {"error": str(e)}
+                return type('MCPErrorMessage', (), {'root': error_message})
         
         # Otherwise, return the message as is
         return message
@@ -91,8 +97,11 @@ class CustomSseServerTransport(SseServerTransport):
         # Parse query string to get session_id
         query_string = scope.get("query_string", b"").decode("utf-8")
         session_id = ""
-        if query_string and "=" in query_string:
-            session_id = query_string.split("=")[1]
+        if query_string:
+            # Parse the query string more robustly
+            query_params = urllib.parse.parse_qs(query_string)
+            # Get the first session_id value if present
+            session_id = query_params.get("session_id", [""])[0]
         
         # Send the endpoint event with properly formatted URL
         endpoint_url = f"{self.raw_endpoint_uri}?session_id={session_id}"
@@ -132,8 +141,13 @@ class CustomSseServerTransport(SseServerTransport):
                         data = message.get("data", "")
                         
                         # Format and send the SSE event
-                        event_text = f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
-                        await send({"type": "http.response.body", "body": event_text.encode("utf-8"), "more_body": True})
+                        try:
+                            # Ensure data is properly JSON serializable
+                            json_data = json.dumps(data)
+                            event_text = f"event: {event_type}\ndata: {json_data}\n\n"
+                            await send({"type": "http.response.body", "body": event_text.encode("utf-8"), "more_body": True})
+                        except (TypeError, ValueError) as e:
+                            print(f"Error serializing message data: {e}")
                 except asyncio.QueueEmpty:
                     pass
                 
@@ -181,12 +195,23 @@ def create_sse_server(mcp: FastMCP):
         # Create our custom transport
         transport = CustomSseServerTransport(full_uri)
         
-        async with transport.connect_sse(
-            request.scope, request.receive, request._send
-        ) as streams:
-            await mcp._mcp_server.run(
-                streams[0], streams[1], mcp._mcp_server.create_initialization_options()
-            )
+        try:
+            async with transport.connect_sse(
+                request.scope, request.receive, request._send
+            ) as streams:
+                await mcp._mcp_server.run(
+                    streams[0], streams[1], mcp._mcp_server.create_initialization_options()
+                )
+        except Exception as e:
+            print(f"Error in SSE handler: {str(e)}")
+            # Return a response if the connection is still open
+            try:
+                # Send error event
+                error_event = f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+                await request._send({"type": "http.response.body", "body": error_event.encode("utf-8"), "more_body": False})
+            except Exception:
+                # Connection may already be closed, ignore
+                pass
     
     # Get the full base URI for the messages endpoint
     host = "localhost"  # Default fallback
