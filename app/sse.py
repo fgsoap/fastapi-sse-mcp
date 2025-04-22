@@ -16,11 +16,8 @@ def create_sse_server(mcp: FastMCP):
         base_path = "/messages/"
         full_uri = f"{scheme}://{host}{base_path}"
         
-        # Create transport with base path only (no full_uri parameter)
-        transport = SseServerTransport(base_path)
-        
-        # Set the base URL properly before connecting
-        transport.base_url = full_uri
+        # Create transport with full_uri parameter
+        transport = SseServerTransport(full_uri)
         
         async with transport.connect_sse(
             request.scope, request.receive, request._send
@@ -29,10 +26,25 @@ def create_sse_server(mcp: FastMCP):
                 streams[0], streams[1], mcp._mcp_server.create_initialization_options()
             )
 
+    # Function to create message handling route with full URL
+    def create_message_handler(request=None):
+        if request:
+            host = request.headers.get('host', 'localhost')
+            scheme = request.headers.get('x-forwarded-proto', request.url.scheme)
+        else:
+            # Default values when not in a request context
+            host = 'localhost'
+            scheme = 'http'
+            
+        base_path = "/messages/"
+        full_uri = f"{scheme}://{host}{base_path}"
+        return SseServerTransport(full_uri).handle_post_message
+
     # Create Starlette routes for SSE and message handling
     routes = [
         Route("/sse/", endpoint=handle_sse),
-        Mount("/messages/", app=SseServerTransport("/messages/").handle_post_message),
+        # We'll dynamically set the full URL when handling the message request
+        Mount("/messages/", app=create_message_handler()),
     ]
 
     # Create a Starlette app
