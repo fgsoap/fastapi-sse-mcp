@@ -11,21 +11,40 @@ from contextlib import asynccontextmanager
 class AsyncStreamAdapter:
     """
     Adapter to make a Queue work as an async stream with context manager support.
+    Also implements the async iterator protocol for use with async for loops.
     """
     def __init__(self, queue):
         self.queue = queue
+        self._closed = False
     
     async def __aenter__(self):
         return self
     
     async def __aexit__(self, exc_type, exc_value, traceback):
-        pass
+        self._closed = True
+    
+    def __aiter__(self):
+        return self
+    
+    async def __anext__(self):
+        if self._closed:
+            raise StopAsyncIteration
+        
+        try:
+            return await self.queue.get()
+        except Exception:
+            if self._closed:
+                raise StopAsyncIteration
+            raise
     
     async def receive(self):
         return await self.queue.get()
     
     async def send(self, data):
         await self.queue.put(data)
+        
+    def close(self):
+        self._closed = True
 
 
 class CustomSseServerTransport(SseServerTransport):
