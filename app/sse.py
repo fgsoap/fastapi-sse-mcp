@@ -5,26 +5,27 @@ from starlette.routing import Mount, Route
 import urllib.parse
 import json
 import asyncio
+from contextlib import asynccontextmanager
 
 
 class CustomSseServerTransport(SseServerTransport):
     """Custom SSE Server Transport that ensures proper URL formatting"""
     
     def __init__(self, endpoint_uri):
-        # Store both the raw and URL-encoded versions
+        # Store the raw endpoint URI
         self.raw_endpoint_uri = endpoint_uri
-        # We'll use a dummy value for the parent class and override its usage
-        super().__init__("dummy")
-        # Then override the endpoint_uri property
-        self._endpoint_uri = endpoint_uri
+        super().__init__(endpoint_uri)
     
+    @asynccontextmanager
     async def connect_sse(self, scope, receive, send):
-        """Override connect_sse to inject our custom logic"""
+        """
+        Handle SSE connection with proper URL formatting.
+        Implementation using asynccontextmanager to properly support async with.
+        """
         # Create SSE response headers
         headers = [(b"content-type", b"text/event-stream"),
                   (b"cache-control", b"no-cache"),
-                  (b"connection", b"keep-alive"),
-                  (b"transfer-encoding", b"chunked")]
+                  (b"connection", b"keep-alive")]
         
         # Send initial response
         await send({"type": "http.response.start", "status": 200, "headers": headers})
@@ -33,40 +34,43 @@ class CustomSseServerTransport(SseServerTransport):
         reader = asyncio.Queue()
         writer = asyncio.Queue()
         
-        # Send the endpoint event with the properly formatted URL
-        # We'll directly craft the SSE event to avoid any encoding
-        session_id = scope["query_string"].decode("utf-8").split("=")[1] if b"=" in scope["query_string"] else ""
-        endpoint_url = f"{self.raw_endpoint_uri}?session_id={session_id}"
+        # Parse query string to get session_id
+        query_string = scope.get("query_string", b"").decode("utf-8")
+        session_id = ""
+        if query_string and "=" in query_string:
+            session_id = query_string.split("=")[1]
         
-        # Format the SSE event text manually to avoid encoding
+        # Send the endpoint event with properly formatted URL
+        endpoint_url = f"{self.raw_endpoint_uri}?session_id={session_id}"
         event_text = f"event: endpoint\ndata: {endpoint_url}\n\n"
         await send({"type": "http.response.body", "body": event_text.encode("utf-8"), "more_body": True})
         
-        # Start the transport background task
-        background_task = asyncio.create_task(self._handle_connection(scope, receive, send, reader, writer))
+        # Send initial ping
+        now = asyncio.get_event_loop().time()
+        ping_event = f": ping - {now}\n\n"
+        await send({"type": "http.response.body", "body": ping_event.encode("utf-8"), "more_body": True})
+        
+        # Start background task for handling the connection
+        task = asyncio.create_task(self._handle_connection(scope, receive, send, reader, writer))
         
         try:
-            # Return the reader and writer for MCP to use
+            # Yield control back to the caller with the streams
             yield reader, writer
         finally:
-            # Clean up the background task when done
-            background_task.cancel()
+            # Clean up when the context is exited
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
     
     async def _handle_connection(self, scope, receive, send, reader, writer):
-        """Handle the ongoing SSE connection after initial setup"""
+        """Handle the ongoing SSE connection"""
+        last_ping = asyncio.get_event_loop().time()
+        
         try:
-            # Process incoming messages and send SSE events
-            last_ping = asyncio.get_event_loop().time()
-            
             while True:
-                # Send ping every 15 seconds
-                now = asyncio.get_event_loop().time()
-                if now - last_ping > 15:
-                    ping_event = f": ping - {now}\n\n"
-                    await send({"type": "http.response.body", "body": ping_event.encode("utf-8"), "more_body": True})
-                    last_ping = now
-                
-                # Process any messages from the writer queue
+                # Check for messages to send
                 try:
                     message = writer.get_nowait()
                     if isinstance(message, dict):
@@ -79,17 +83,28 @@ class CustomSseServerTransport(SseServerTransport):
                 except asyncio.QueueEmpty:
                     pass
                 
-                # Check for client disconnect
-                message = await asyncio.wait_for(receive(), timeout=1.0)
-                if message["type"] == "http.disconnect":
-                    break
+                # Send ping every 15 seconds
+                now = asyncio.get_event_loop().time()
+                if now - last_ping > 15:
+                    ping_event = f": ping - {now}\n\n"
+                    await send({"type": "http.response.body", "body": ping_event.encode("utf-8"), "more_body": True})
+                    last_ping = now
+                
+                # Check for client messages or disconnection
+                try:
+                    message = await asyncio.wait_for(receive(), timeout=0.1)
+                    if message["type"] == "http.disconnect":
+                        break
+                except asyncio.TimeoutError:
+                    # No message received, continue
+                    pass
                 
                 # Small delay to prevent CPU spinning
                 await asyncio.sleep(0.1)
                 
         except asyncio.CancelledError:
             # Task was cancelled, clean up
-            pass
+            raise
         except Exception as e:
             # Log any errors
             print(f"Error in SSE connection: {e}")
