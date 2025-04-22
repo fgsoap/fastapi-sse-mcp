@@ -38,7 +38,18 @@ class AsyncStreamAdapter:
             raise
     
     async def receive(self):
-        return await self.queue.get()
+        message = await self.queue.get()
+        
+        # Process the message to make it compatible with MCP
+        # If it's a dict from HTTP event, add a 'root' field to make it compatible
+        # with what the MCP server expects
+        if isinstance(message, dict) and 'type' in message:
+            # This is a raw HTTP message that needs to be processed
+            # Create a structure that MCP can handle (with a root attribute)
+            return type('MCPMessage', (), {'root': message})
+        
+        # Otherwise, return the message as is
+        return message
     
     async def send(self, data):
         await self.queue.put(data)
@@ -167,7 +178,7 @@ def create_sse_server(mcp: FastMCP):
         base_path = "/messages/"
         full_uri = f"{scheme}://{host}{base_path}"
         
-        # Use our custom transport
+        # Create our custom transport
         transport = CustomSseServerTransport(full_uri)
         
         async with transport.connect_sse(
@@ -176,11 +187,23 @@ def create_sse_server(mcp: FastMCP):
             await mcp._mcp_server.run(
                 streams[0], streams[1], mcp._mcp_server.create_initialization_options()
             )
+    
+    # Get the full base URI for the messages endpoint
+    host = "localhost"  # Default fallback
+    scheme = "http"     # Default fallback
+    # Note: We're setting defaults here since we're not in a request context
+    # The actual values will be determined at request time in handle_sse
+    
+    base_path = "/messages/"
+    full_uri = f"{scheme}://{host}{base_path}"
+    
+    # Create a single transport instance to be used for both routes
+    message_transport = CustomSseServerTransport(full_uri)
 
     # Create Starlette routes for SSE and message handling
     routes = [
         Route("/sse/", endpoint=handle_sse),
-        Mount("/messages/", app=SseServerTransport("/messages/").handle_post_message),
+        Mount("/messages/", app=message_transport.handle_post_message),
     ]
 
     # Create a Starlette app
