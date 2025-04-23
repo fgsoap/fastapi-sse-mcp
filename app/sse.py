@@ -11,9 +11,18 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 import mcp.types as types
 
 
+class CustomEventSourceResponse(EventSourceResponse):
+    """Custom SSE response that uses the correct Content-Type header"""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Override the Content-Type header to remove charset
+        self.headers["Content-Type"] = "text/event-stream"
+
+
 class CustomSseServerTransport(BaseSseServerTransport):
     """Custom SSE transport that doesn't URL encode the full endpoint URL"""
-
+    
     @asynccontextmanager
     async def connect_sse(self, scope: Scope, receive: Receive, send: Send):
         if scope["type"] != "http":
@@ -49,11 +58,11 @@ class CustomSseServerTransport(BaseSseServerTransport):
                     )
 
         async with anyio.create_task_group() as tg:
-            response = EventSourceResponse(
+            # Use our custom response class instead of EventSourceResponse
+            response = CustomEventSourceResponse(
                 content=sse_stream_reader, data_sender_callable=sse_writer
             )
             tg.start_soon(response, scope, receive, send)
-            # Pass read_stream and write_stream (not their counterparts) to the MCP server
             yield (read_stream, write_stream)
 
 
@@ -81,14 +90,8 @@ def create_sse_server(mcp: FastMCP):
     # Create Starlette routes for SSE and message handling
     routes = [
         Route("/sse/", endpoint=handle_sse),
-        Mount(
-            "/messages/",
-            app=lambda scope, receive, send: transport.handle_post_message(
-                scope, receive, send
-            )
-            if transport
-            else None,
-        ),
+        Mount("/messages/", app=lambda scope, receive, send: 
+              transport.handle_post_message(scope, receive, send) if transport else None),
     ]
 
     # Create a Starlette app
