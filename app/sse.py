@@ -2,208 +2,45 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
-import urllib.parse
-import json
-import asyncio
-from contextlib import asynccontextmanager
-
-
-class AsyncStreamAdapter:
-    """
-    Adapter to make a Queue work as an async stream with context manager support.
-    Also implements the async iterator protocol for use with async for loops.
-    """
-    def __init__(self, queue):
-        self.queue = queue
-        self._closed = False
-    
-    async def __aenter__(self):
-        return self
-    
-    async def __aexit__(self, exc_type, exc_value, traceback):
-        self._closed = True
-    
-    def __aiter__(self):
-        return self
-    
-    async def __anext__(self):
-        if self._closed:
-            raise StopAsyncIteration
-        
-        try:
-            return await self.queue.get()
-        except Exception:
-            if self._closed:
-                raise StopAsyncIteration
-            raise
-    
-    async def receive(self):
-        message = await self.queue.get()
-        
-        # Process the message to make it compatible with MCP
-        # If it's a dict from HTTP event, add a 'root' field to make it compatible
-        # with what the MCP server expects
-        if isinstance(message, dict) and 'type' in message:
-            # This is a raw HTTP message that needs to be processed
-            # Create a structure that MCP can handle (with a root attribute)
-            return type('MCPMessage', (), {'root': message})
-        
-        # Otherwise, return the message as is
-        return message
-    
-    async def send(self, data):
-        await self.queue.put(data)
-        
-    def close(self):
-        self._closed = True
-
-
-class CustomSseServerTransport(SseServerTransport):
-    """Custom SSE Server Transport that ensures proper URL formatting"""
-    
-    def __init__(self, endpoint_uri):
-        # Store the raw endpoint URI
-        self.raw_endpoint_uri = endpoint_uri
-        super().__init__(endpoint_uri)
-    
-    @asynccontextmanager
-    async def connect_sse(self, scope, receive, send):
-        """
-        Handle SSE connection with proper URL formatting.
-        Implementation using asynccontextmanager to properly support async with.
-        """
-        # Create SSE response headers
-        headers = [(b"content-type", b"text/event-stream"),
-                  (b"cache-control", b"no-cache"),
-                  (b"connection", b"keep-alive")]
-        
-        # Send initial response
-        await send({"type": "http.response.start", "status": 200, "headers": headers})
-        
-        # Create reader and writer queues
-        reader_queue = asyncio.Queue()
-        writer_queue = asyncio.Queue()
-        
-        # Create stream adapters that support the async context manager protocol
-        reader = AsyncStreamAdapter(reader_queue)
-        writer = AsyncStreamAdapter(writer_queue)
-        
-        # Parse query string to get session_id
-        query_string = scope.get("query_string", b"").decode("utf-8")
-        session_id = ""
-        if query_string and "=" in query_string:
-            session_id = query_string.split("=")[1]
-        
-        # Send the endpoint event with properly formatted URL
-        endpoint_url = f"{self.raw_endpoint_uri}?session_id={session_id}"
-        event_text = f"event: endpoint\ndata: {endpoint_url}\n\n"
-        await send({"type": "http.response.body", "body": event_text.encode("utf-8"), "more_body": True})
-        
-        # Send initial ping
-        now = asyncio.get_event_loop().time()
-        ping_event = f": ping - {now}\n\n"
-        await send({"type": "http.response.body", "body": ping_event.encode("utf-8"), "more_body": True})
-        
-        # Start background task for handling the connection
-        task = asyncio.create_task(self._handle_connection(scope, receive, send, reader_queue, writer_queue))
-        
-        try:
-            # Yield control back to the caller with the streams
-            yield reader, writer
-        finally:
-            # Clean up when the context is exited
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-    
-    async def _handle_connection(self, scope, receive, send, reader_queue, writer_queue):
-        """Handle the ongoing SSE connection"""
-        last_ping = asyncio.get_event_loop().time()
-        
-        try:
-            while True:
-                # Check for messages to send
-                try:
-                    message = writer_queue.get_nowait()
-                    if isinstance(message, dict):
-                        event_type = message.get("event", "message")
-                        data = message.get("data", "")
-                        
-                        # Format and send the SSE event
-                        event_text = f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
-                        await send({"type": "http.response.body", "body": event_text.encode("utf-8"), "more_body": True})
-                except asyncio.QueueEmpty:
-                    pass
-                
-                # Send ping every 15 seconds
-                now = asyncio.get_event_loop().time()
-                if now - last_ping > 15:
-                    ping_event = f": ping - {now}\n\n"
-                    await send({"type": "http.response.body", "body": ping_event.encode("utf-8"), "more_body": True})
-                    last_ping = now
-                
-                # Check for client messages or disconnection
-                try:
-                    message = await asyncio.wait_for(receive(), timeout=0.1)
-                    if message["type"] == "http.disconnect":
-                        break
-                    
-                    # If there's a message, put it in the reader queue
-                    await reader_queue.put(message)
-                except asyncio.TimeoutError:
-                    # No message received, continue
-                    pass
-                
-                # Small delay to prevent CPU spinning
-                await asyncio.sleep(0.1)
-                
-        except asyncio.CancelledError:
-            # Task was cancelled, clean up
-            raise
-        except Exception as e:
-            # Log any errors
-            print(f"Error in SSE connection: {e}")
-
+# No uuid import needed if not generating unique IDs
 
 def create_sse_server(mcp: FastMCP):
     """Create a Starlette app that handles SSE connections and message handling"""
-    
+    message_endpoint_path = "/messages/"
+    transport = SseServerTransport(message_endpoint_path)
+
     # Define handler functions
     async def handle_sse(request):
-        # Get the full URI from the request
-        host = request.headers.get('host', 'localhost')
-        scheme = request.headers.get('x-forwarded-proto', request.url.scheme)
-        base_path = "/messages/"
-        full_uri = f"{scheme}://{host}{base_path}"
-        
-        # Create our custom transport
-        transport = CustomSseServerTransport(full_uri)
-        
+        # Construct the base URL for the messages endpoint
+        # It uses the scheme and host/port from the incoming request
+        # No unique session_id is added here
+        messages_url = f"{request.url.scheme}://{request.url.netloc}{message_endpoint_path}"
+
+        # If you literally want "?session_id=" at the end:
+        # messages_url = f"{request.url.scheme}://{request.url.netloc}{message_endpoint_path}?session_id="
+
         async with transport.connect_sse(
             request.scope, request.receive, request._send
         ) as streams:
+            # Assuming streams[1] is the channel/stream for sending data to the client
+            send_stream = streams[1]
+
+            # --- Send the initial custom event ---
+            event_name = "endpoint"
+            event_data = messages_url
+            sse_message = f"event: {event_name}\ndata: {event_data}\n\n"
+            await send_stream.send(sse_message.encode('utf-8'))
+            # --- End of initial event sending ---
+
+            # Now, run the main MCP server logic
             await mcp._mcp_server.run(
-                streams[0], streams[1], mcp._mcp_server.create_initialization_options()
+                streams[0], send_stream, mcp._mcp_server.create_initialization_options()
             )
-    
-    # Get the full base URI for the messages endpoint
-    host = "localhost"  # Default fallback
-    scheme = "http"     # Default fallback
-    # Note: We're setting defaults here since we're not in a request context
-    # The actual values will be determined at request time in handle_sse
-    
-    base_path = "/messages/"
-    full_uri = f"{scheme}://{host}{base_path}"
-    
-    # Create a single transport instance to be used for both routes
-    message_transport = CustomSseServerTransport(full_uri)
 
     # Create Starlette routes for SSE and message handling
     routes = [
         Route("/sse/", endpoint=handle_sse),
-        Mount("/messages/", app=message_transport.handle_post_message),
+        Mount(message_endpoint_path, app=transport.handle_post_message),
     ]
 
     # Create a Starlette app
