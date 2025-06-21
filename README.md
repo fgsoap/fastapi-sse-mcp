@@ -7,7 +7,7 @@ A FastAPI application that demonstrates Server-Sent Events (SSE) integration wit
 This project showcases how to use Server-Sent Events (SSE) and simple HTTP streaming as transport layers for MCP in a FastAPI application. It provides a simple echo service that can:
 
 - Handle FastAPI HTTP requests
-- Implement MCP tools, resources and prompts using the MCP python-sdk
+- Implement MCP tools, resources and prompts using the MCP Python SDK
 
 ## Requirements
 
@@ -78,7 +78,7 @@ The application provides three example MCP functions and now supports HTTP strea
 
 MIT License
 
-Copyright (c) 2024 Ragie Corp
+Copyright (c) 2025 Ragie Corp
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
