@@ -2,6 +2,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.sse import SseServerTransport as BaseSseServerTransport
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
+from starlette.responses import PlainTextResponse
 from contextlib import asynccontextmanager
 from starlette.types import Receive, Scope, Send
 from uuid import uuid4
@@ -13,7 +14,7 @@ import mcp.types as types
 
 class CustomEventSourceResponse(EventSourceResponse):
     """Custom SSE response that uses the correct Content-Type header"""
-    
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Override the Content-Type header to remove charset
@@ -22,7 +23,7 @@ class CustomEventSourceResponse(EventSourceResponse):
 
 class CustomSseServerTransport(BaseSseServerTransport):
     """Custom SSE transport that doesn't URL encode the full endpoint URL"""
-    
+
     @asynccontextmanager
     async def connect_sse(self, scope: Scope, receive: Receive, send: Send):
         if scope["type"] != "http":
@@ -51,9 +52,7 @@ class CustomSseServerTransport(BaseSseServerTransport):
                     await sse_stream_writer.send(
                         {
                             "event": "message",
-                            "data": message.model_dump_json(
-                                by_alias=True, exclude_none=True
-                            ),
+                            "data": message.model_dump_json(by_alias=True, exclude_none=True),
                         }
                     )
 
@@ -87,11 +86,20 @@ def create_sse_server(mcp: FastMCP):
                 streams[0], streams[1], mcp._mcp_server.create_initialization_options()
             )
 
+    async def handle_messages(scope: Scope, receive: Receive, send: Send):
+        """Handle POST requests once the transport is initialized."""
+        if transport is None:
+            response = PlainTextResponse(
+                "SSE transport not initialized", status_code=503
+            )
+            await response(scope, receive, send)
+        else:
+            await transport.handle_post_message(scope, receive, send)
+
     # Create Starlette routes for SSE and message handling
     routes = [
         Route("/sse/", endpoint=handle_sse),
-        Mount("/messages/", app=lambda scope, receive, send: 
-              transport.handle_post_message(scope, receive, send) if transport else None),
+        Mount("/messages/", app=handle_messages),
     ]
 
     # Create a Starlette app
