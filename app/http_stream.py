@@ -5,7 +5,7 @@ from starlette.applications import Starlette
 from starlette.routing import Mount, Route
 from contextlib import asynccontextmanager
 from starlette.types import Receive, Scope, Send
-from starlette.responses import StreamingResponse, Response
+from starlette.responses import StreamingResponse, Response, PlainTextResponse
 from starlette.requests import Request
 from uuid import uuid4, UUID
 import anyio
@@ -103,16 +103,19 @@ def create_http_stream_server(mcp: FastMCP) -> Starlette:
                 streams[0], streams[1], mcp._mcp_server.create_initialization_options()
             )
 
+    async def handle_messages(scope: Scope, receive: Receive, send: Send):
+        """Handle POST requests once the transport is initialized."""
+        if transport is None:
+            response = PlainTextResponse(
+                "HTTP streaming transport not initialized", status_code=503
+            )
+            await response(scope, receive, send)
+        else:
+            await transport.handle_post_message(scope, receive, send)
+
     routes = [
         Route("/stream/", endpoint=handle_stream),
-        Mount(
-            "/messages/",
-            app=lambda scope, receive, send: transport.handle_post_message(
-                scope, receive, send
-            )
-            if transport
-            else None,
-        ),
+        Mount("/messages/", app=handle_messages),
     ]
 
     return Starlette(routes=routes)
