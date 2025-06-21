@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from app.sse import create_sse_server
+from app.http_stream import create_http_stream_server
 from mcp.server.fastmcp import FastMCP
 
 app = FastAPI()
@@ -7,6 +8,8 @@ mcp = FastMCP("MCP-SSE")
 
 # Mount the Starlette SSE server onto the FastAPI app
 app.mount("/", create_sse_server(mcp))
+# Mount HTTP streaming server under /http
+app.mount("/http", create_http_stream_server(mcp))
 
 
 @app.get("/")
